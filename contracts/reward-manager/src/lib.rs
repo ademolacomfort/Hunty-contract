@@ -390,8 +390,8 @@ impl RewardManager {
     }
 
     /// Initializes the RewardManager with the XLM token contract address (SAC).
-    /// Must be called once before any reward distribution.
-    /// @deprecated Use constructor during deployment instead.
+    /// Must be called once before any reward distribution. Rejects a second
+    /// call with `AlreadyInitialized`.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -1592,11 +1592,7 @@ impl RewardManager {
         // remains true for the source pool. Without this, `get_reward_pool` on
         // the source shows funds that vanished with no explanation.
         let prev_migrated_out = Storage::get_pool_total_migrated_out(&env, source_hunt_id);
-        Storage::set_pool_total_migrated_out(
-            &env,
-            source_hunt_id,
-            prev_migrated_out + amount,
-        );
+        Storage::set_pool_total_migrated_out(&env, source_hunt_id, prev_migrated_out + amount);
 
         // The source's sponsors no longer have a claim there — their share of
         // the balance just moved to the destination pool under the creator's
@@ -1841,7 +1837,9 @@ impl RewardManager {
     /// that a freeze issued by the admin may only be lifted by the admin
     /// (#1077). Any freezer other than the pool creator was the admin at the
     /// time of the freeze, so this restriction also survives an admin rotation.
-    /// Clears `RewardPoolConfig::frozen_by`.
+    /// A frozen pool with no recorded freezer (freeze state written before
+    /// `frozen_by` existed) is treated as an admin freeze and can only be
+    /// lifted by the admin. Clears `RewardPoolConfig::frozen_by`.
     /// Emits a `PoolUnfrozenEvent`.
     ///
     /// # Arguments
@@ -1871,11 +1869,18 @@ impl RewardManager {
         // admin. The creator cannot record an admin freeze, so "frozen by
         // anyone other than the creator" means "frozen by the admin" — even if
         // the admin address has since rotated.
-        let admin_freeze = config
+        let frozen_by_creator = config
             .frozen_by
             .as_ref()
-            .map(|freezer| freezer != &config.creator)
+            .map(|freezer| freezer == &config.creator)
             .unwrap_or(false);
+        // Fail closed when a pool is frozen but carries no recorded freezer:
+        // an unattributed freeze cannot be proven to be a creator freeze, so
+        // only the admin may lift it. `freeze_pool` always records the caller,
+        // so this only triggers for freeze state written before `frozen_by`
+        // existed. A pool that is not frozen is unaffected (both parties may
+        // still call `unfreeze_pool` as a no-op).
+        let admin_freeze = config.frozen && !frozen_by_creator;
         if admin_freeze && !is_admin {
             return Err(RewardErrorCode::Unauthorized);
         }
@@ -2799,11 +2804,7 @@ impl RewardManager {
     /// A `Vec<PendingNftMint>` of pending mint entries, up to `limit` entries
     /// starting from `offset`. Returns an empty `Vec` when `offset` is beyond
     /// the end of the list or when no pending mints exist.
-    pub fn list_pending_nft_mints(
-        env: Env,
-        offset: u32,
-        limit: u32,
-    ) -> Vec<PendingNftMint> {
+    pub fn list_pending_nft_mints(env: Env, offset: u32, limit: u32) -> Vec<PendingNftMint> {
         Storage::list_pending_nft_mints(&env, offset, limit)
     }
 
@@ -2852,6 +2853,7 @@ impl RewardManager {
     /// - No structured logging of the error
     pub fn distribute_rewards_legacy(
         env: Env,
+        caller: Address,
         player: Address,
         hunt_id: u64,
         xlm_amount: i128,
@@ -2872,7 +2874,7 @@ impl RewardManager {
             nft_tier: 0,
             completion_rank: 0,
         };
-        Self::distribute_rewards(env, hunt_id, player, config).is_ok()
+        Self::distribute_rewards(env, caller, hunt_id, player, config).is_ok()
     }
 
     /// Returns the distribution status for a hunt/player pair.
@@ -2973,6 +2975,7 @@ impl RewardManager {
     /// Returns the XLM amount distributed.
     pub fn distribute_proportional(
         env: Env,
+        caller: Address,
         hunt_id: u64,
         player: Address,
         player_score: u64,
@@ -3023,7 +3026,7 @@ impl RewardManager {
             completion_rank: 0,
         };
 
-        Self::distribute_rewards(env, hunt_id, player, config)?;
+        Self::distribute_rewards(env, caller, hunt_id, player, config)?;
         Ok(amount)
     }
 
@@ -3921,14 +3924,27 @@ impl RewardManager {
         env: Env,
         admin: Address,
         target_version: u32,
+        wasm_hash: BytesN<32>,
     ) -> Result<hunty_migration::UpgradeProposal, hunty_migration::UpgradeAuthError> {
-        let proposal =
-            migration::RewardManagerMigration::propose_upgrade(&env, &admin, target_version)?;
+        let proposal = migration::RewardManagerMigration::propose_upgrade(
+            &env,
+            &admin,
+            target_version,
+            wasm_hash,
+        )?;
         env.events().publish(
             migration::RewardManagerMigration::upgrade_proposed_topic(&env),
             migration::RewardManagerMigration::upgrade_proposed_event(&proposal),
         );
         Ok(proposal)
+    }
+
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), hunty_migration::UpgradeAuthError> {
+        migration::RewardManagerMigration::upgrade(&env, &admin, new_wasm_hash)
     }
 
     pub fn set_upgrade_timelock(

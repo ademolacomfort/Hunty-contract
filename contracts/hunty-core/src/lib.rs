@@ -2717,7 +2717,7 @@ impl HuntyCore {
         // Hash the invite code with hunt_id as salt to prevent rainbow-table attacks.
         // Use the same buffer-based approach as normalize_and_hash_answer for consistency.
         let code_len = invite_code.len() as usize;
-        if code_len == 0 || code_len > MAX_INVITE_CODE_LENGTH {
+        if !(MIN_INVITE_CODE_LENGTH..=MAX_INVITE_CODE_LENGTH).contains(&code_len) {
             return Err(HuntErrorCode::InvalidAnswer);
         }
         let mut buf = [0u8; 8 + MAX_INVITE_CODE_LENGTH];
@@ -4120,7 +4120,7 @@ impl HuntyCore {
         if Storage::get_co_creators(&env, hunt_id).len() >= MAX_CO_CREATORS_PER_HUNT {
             return Err(HuntErrorCode::TooManyClues);
         }
-        Storage::add_co_creator(&env, hunt_id, &new_co_creator);
+        Storage::add_co_creator(&env, hunt_id, &new_co_creator)?;
 
         let event = CoCreatorAddedEvent {
             hunt_id,
@@ -4307,6 +4307,52 @@ impl HuntyCore {
 
     pub fn initialize_schema(env: Env) {
         migration::HuntyCoreMigration::initialize_schema(&env);
+    }
+
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        target_version: u32,
+        wasm_hash: BytesN<32>,
+    ) -> Result<hunty_migration::UpgradeProposal, hunty_migration::UpgradeAuthError> {
+        let proposal = migration::HuntyCoreMigration::propose_upgrade(&env, &admin, target_version, wasm_hash)?;
+        env.events().publish(
+            migration::HuntyCoreMigration::upgrade_proposed_topic(&env),
+            migration::HuntyCoreMigration::upgrade_proposed_event(&proposal),
+        );
+        Ok(proposal)
+    }
+
+    pub fn set_upgrade_timelock(
+        env: Env,
+        admin: Address,
+        delay_seconds: u64,
+    ) -> Result<(), hunty_migration::UpgradeAuthError> {
+        migration::HuntyCoreMigration::set_upgrade_timelock(&env, &admin, delay_seconds)
+    }
+
+    pub fn get_upgrade_proposal(env: Env) -> Option<hunty_migration::UpgradeProposal> {
+        migration::HuntyCoreMigration::get_upgrade_proposal(&env)
+    }
+
+    pub fn get_upgrade_timelock(env: Env) -> u64 {
+        migration::HuntyCoreMigration::get_upgrade_timelock(&env)
+    }
+
+    pub fn get_upgrade_history(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> soroban_sdk::Vec<hunty_migration::UpgradeHistoryEntry> {
+        migration::HuntyCoreMigration::get_upgrade_history(&env, offset, limit)
+    }
+
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), hunty_migration::UpgradeAuthError> {
+        migration::HuntyCoreMigration::upgrade(&env, &admin, new_wasm_hash)
     }
 
     pub fn run_migration(
